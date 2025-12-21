@@ -2,6 +2,7 @@
   "name": "Optionality MVP",
   "description": "A calm, neutral intelligence designed to measure structural freedom and generate reversible paths. Features an interactive assessment and a real-time voice interface.",
   "requestFramePermissions": [
-    "microphone"
+    "microphone",
+    "geolocation"
   ]
 }

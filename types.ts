@@ -34,7 +34,10 @@ export enum AppMode {
   LANDING = 'LANDING',
   ASSESSMENT = 'ASSESSMENT',
   RESULTS = 'RESULTS',
-  LIVE_VOICE = 'LIVE_VOICE'
+  LIVE_VOICE = 'LIVE_VOICE',
+  CHAT = 'CHAT',
+  MAPS = 'MAPS',
+  VISION = 'VISION'
 }
 
 export const INITIAL_ANSWERS: AssessmentAnswers = {
