@@ -1,237 +1,186 @@
+
 import React, { useMemo } from 'react';
-import { AssessmentAnswers, AppMode, ReversibleMove } from '../types';
-import { SCORING_WEIGHTS } from '../constants';
-import { ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar } from 'recharts';
-import { RefreshCw, ArrowLeft, Download } from 'lucide-react';
+import { DecisionAnswers, AppMode, DecisionResult, PillarScores } from '../types';
+import { OPTIONALITY_OS_CONFIG } from '../constants';
+import { Zap, ShieldCheck, Download, ArrowLeft, RefreshCw, BarChart3, Target } from 'lucide-react';
 
 interface Props {
-  answers: AssessmentAnswers;
+  answers: DecisionAnswers;
   setMode: (m: AppMode) => void;
 }
 
 const ResultsDashboard: React.FC<Props> = ({ answers, setMode }) => {
-  const results = useMemo(() => {
-    // Score Calculation Engine
-    let incomeScore = Math.min(100, (answers.income_sources / 3) * 100);
-    if (answers.income_concentration > 80) incomeScore -= 20;
-
-    const currencyScore = Math.min(100, (answers.currency_count / 3) * 100);
+  const result: DecisionResult = useMemo(() => {
+    const maps = OPTIONALITY_OS_CONFIG.mapping;
     
-    // Time Score: 12 months buffer = 100 score
-    const timeScore = Math.min(100, (answers.time_buffer / 12) * 100);
+    const G = (maps.gain as any)[answers.upside] || 0;
+    const E = (maps.effort as any)[answers.effort] || 1;
+    const R = (maps.reversibility as any)[answers.reversibility] || 1;
+    const TP = (maps.time_penalty as any)[answers.time_to_signal] || 1;
     
-    let leverageScore = 100;
-    if (answers.leverage_debt) leverageScore -= 30;
-    if (answers.leverage_guarantees) leverageScore -= 20;
+    let multiplierSum = answers.multipliers.reduce((acc, m) => acc + ((maps.multipliers as any)[m] || 0), 0);
+    const M = Math.min(10, multiplierSum);
 
-    // Reversibility Logic: The "Exit Door" Metric
-    let reversibilityScore = 50; // Medium
-    if (answers.commitment_reversibility === 'High') reversibilityScore = 100;
-    if (answers.commitment_reversibility === 'Low') reversibilityScore = 0;
+    // GEM and Effective Optionality
+    const gem_score = (G * M) / E;
+    const effective_optionality = (G * M * R * TP) / E;
 
-    let total = 
-      (incomeScore * SCORING_WEIGHTS.income_diversity) +
-      (currencyScore * SCORING_WEIGHTS.currency_diversity) +
-      (timeScore * SCORING_WEIGHTS.time_buffer) +
-      (leverageScore * SCORING_WEIGHTS.leverage_exposure) +
-      (reversibilityScore * SCORING_WEIGHTS.jurisdictional_flexibility);
+    // Pillar Scores (Mock logic mapping for v1 alignment)
+    const pillars: PillarScores = {
+      geography: R * (answers.mobilityLevel === 'High' ? 1.2 : 1),
+      income: G * (M / 2),
+      capabilities: answers.multipliers.length * 2,
+      network: answers.multipliers.includes('New relationships') ? 8 : 4,
+      assets: (G * R) / 2
+    };
 
-    // Structural Multipliers
-    if (answers.commitment_reversibility === 'Low') {
-      total -= 15; // Structural Drag Penalty
-    }
-    if (answers.commitment_reversibility === 'High') {
-      total += 10; // Agility Bonus
-    }
+    // Sheet Tier Logic
+    // Based on sum of pillars (max potential ~50)
+    const totalPillarSum = pillars.geography + pillars.income + pillars.capabilities + pillars.network + pillars.assets;
+    let tier = "E — Fragile";
+    if (totalPillarSum >= 85) tier = "A — Sovereign"; // Note: scaling depends on normalized weights
+    else if (totalPillarSum >= 45) tier = "B — Strong";
+    else if (totalPillarSum >= 30) tier = "C — Developing";
+    else if (totalPillarSum >= 15) tier = "D — Exposed";
 
-    total = Math.max(0, Math.min(100, Math.round(total)));
+    // Client ID Generation Formula: First Initial + YYMMDD + "-" + Last 4 of Email/ID
+    const date = new Date();
+    const dateStr = date.toISOString().slice(2,10).replace(/-/g,'');
+    const emailSuffix = answers.email ? answers.email.slice(-4).replace(/[^0-9]/g, '1') : Math.floor(1000 + Math.random() * 9000);
+    const clientId = `${(answers.firstName[0] || 'X').toUpperCase()}${dateStr}-${emailSuffix}`;
 
-    const moves: ReversibleMove[] = [];
+    // Classification
+    let classification = "Neutral";
+    if (effective_optionality >= 12 && R >= 6 && E <= 5) classification = "High Optionality";
+    else if (E >= 7 && (M <= 3 || R <= 3)) classification = "Optimization Trap";
 
-    // Income Concentration Logic
-    if (answers.income_concentration > 70) {
-      moves.push({ 
-        area: "Income", 
-        option: "Experiment: Research and outline one new service offering that leverages your existing skills but targets a different industry.", 
-        reversibility: "High", 
-        risk: "None" 
-      });
-    }
-
-    // Currency Diversity Logic
-    if (answers.currency_count < 2) {
-      moves.push({ 
-        area: "Currency", 
-        option: "Setup: Open a borderless account (e.g., Wise) and hold $100 in a secondary stable currency.", 
-        reversibility: "High", 
-        risk: "Low" 
-      });
-    }
-
-    // Time Buffer Logic (< 3 months)
-    if (answers.time_buffer < 3) {
-      moves.push({ 
-        area: "Time / Cash", 
-        option: 'Experiment: Auto-sweep 5% of every deposit into a separate "Freedom Fund" for 30 days.', 
-        reversibility: "High", 
-        risk: "None" 
-      });
-      moves.push({ 
-        area: "Time / Cash", 
-        option: "Audit: Review last 90 days of spending. Identify 2 recurring costs to pause for 1 month.", 
-        reversibility: "High", 
-        risk: "None" 
-      });
-    }
-
-    // Leverage Debt Logic
-    if (answers.leverage_debt) {
-       moves.push({
-         area: "Leverage",
-         option: "Pause: Commit to zero new consumer debt for 30 days to observe impact on stress.",
-         reversibility: "High",
-         risk: "None"
-       });
-    }
-
-    const narrative = results?.total > 70 
-      ? "Your optionality score reflects strong structural freedom. You have built significant buffers, but maintain vigilance against complacency."
-      : "Your optionality score reflects some structural fragility. Dependency on specific systems limits your maneuvering room during volatility.";
+    // Recommendation
+    let recommendation = "Proceed small";
+    if (classification === "High Optionality") recommendation = "Double down carefully";
+    else if (classification === "Optimization Trap") recommendation = "Kill or shrink";
 
     return {
-      total,
-      narrative,
-      chartData: [
-        { subject: 'Income', A: incomeScore, fullMark: 100 },
-        { subject: 'Currency', A: currencyScore, fullMark: 100 },
-        { subject: 'Time', A: timeScore, fullMark: 100 },
-        { subject: 'Leverage', A: leverageScore, fullMark: 100 },
-        { subject: 'Flex', A: reversibilityScore, fullMark: 100 },
-      ],
-      moves
+      clientId,
+      idea: answers.idea_description,
+      scores: {
+        gain: G,
+        effort: E,
+        multiplier: M,
+        reversibility: R,
+        time_penalty: TP,
+        gem_score,
+        effective_optionality,
+        pillars
+      },
+      classification,
+      tier,
+      warnings: [], // Filtered in real use
+      recommendation
     };
   }, [answers]);
 
-  const exportToCSV = () => {
-    const csvRows = [];
-    csvRows.push(['Optionality Assessment Results']);
-    csvRows.push(['Generated', new Date().toLocaleString()]);
-    csvRows.push(['']);
-
-    csvRows.push(['--- Raw Data ---']);
-    csvRows.push(['Metric', 'Value']);
-    Object.entries(answers).forEach(([key, value]) => {
-      csvRows.push([key, value]);
-    });
-    csvRows.push(['']);
-
-    csvRows.push(['--- Analysis ---']);
-    csvRows.push(['Overall Score', results.total]);
-    csvRows.push(['Analysis Summary', `"${results.narrative}"`]);
-    csvRows.push(['']);
-    csvRows.push(['Area', 'Score (0-100)']);
-    results.chartData.forEach(item => {
-      csvRows.push([item.subject, Math.round(item.A)]);
-    });
-    csvRows.push(['']);
-
-    csvRows.push(['--- Recommended Reversible Moves ---']);
-    csvRows.push(['Area', 'Option', 'Reversibility', 'Risk']);
-    results.moves.forEach(move => {
-      csvRows.push([move.area, `"${move.option}"`, move.reversibility, move.risk]);
-    });
-
-    const csvContent = csvRows.map(row => row.join(',')).join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.setAttribute('href', url);
-    link.setAttribute('download', `optionality_results_${new Date().toISOString().split('T')[0]}.csv`);
-    link.style.visibility = 'hidden';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
   return (
-    <div className="w-full max-w-5xl mx-auto p-6 md:p-12 animate-fade-in">
-      <div className="flex justify-between items-center mb-12">
-        <button onClick={() => setMode(AppMode.LANDING)} className="flex items-center gap-2 text-zinc-500 hover:text-white transition-colors">
-          <ArrowLeft size={16} /> Back
-        </button>
-        <div className="flex items-center gap-6">
-          <button 
-            onClick={exportToCSV}
-            className="flex items-center gap-2 text-zinc-500 hover:text-emerald-400 transition-colors text-xs uppercase tracking-widest"
-          >
-            <Download size={14} />
-            Export CSV
+    <div className="w-full max-w-6xl mx-auto p-6 md:p-12 animate-fade-in">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 mb-16">
+        <div>
+          <button onClick={() => setMode(AppMode.LANDING)} className="flex items-center gap-2 text-zinc-500 hover:text-white transition-colors mb-4">
+            <ArrowLeft size={16} /> Exit to OS
           </button>
-          <div className="text-zinc-500 uppercase tracking-widest text-xs hidden sm:block">Optionality Snapshot</div>
+          <div className="flex items-center gap-3">
+            <h1 className="text-4xl font-light text-white tracking-tight">{result.tier}</h1>
+            <div className="px-3 py-1 bg-zinc-800 border border-zinc-700 rounded text-[10px] text-zinc-400 font-mono uppercase tracking-widest">
+              ID: {result.clientId}
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+           <div className={`px-4 py-2 rounded-xl text-[10px] uppercase tracking-widest font-bold border ${
+             result.classification === 'High Optionality' ? 'bg-emerald-500/10 border-emerald-500/50 text-emerald-400' :
+             result.classification === 'Optimization Trap' ? 'bg-red-500/10 border-red-500/50 text-red-400' :
+             'bg-zinc-800 border-zinc-700 text-zinc-400'
+           }`}>
+             {result.classification}
+           </div>
+           <button className="p-2 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-zinc-400">
+             <Download size={18} />
+           </button>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 lg:gap-24">
-        <div className="flex flex-col items-center">
-          <div className="relative w-full aspect-square max-w-md">
-            <ResponsiveContainer width="100%" height="100%">
-              <RadarChart cx="50%" cy="50%" outerRadius="80%" data={results.chartData}>
-                <PolarGrid stroke="#3f3f46" />
-                <PolarAngleAxis dataKey="subject" tick={{ fill: '#a1a1aa', fontSize: 12 }} />
-                <PolarRadiusAxis angle={30} domain={[0, 100]} tick={false} axisLine={false} />
-                <Radar
-                  name="Optionality"
-                  dataKey="A"
-                  stroke="#10b981"
-                  strokeWidth={2}
-                  fill="#10b981"
-                  fillOpacity={0.3}
-                />
-              </RadarChart>
-            </ResponsiveContainer>
-            
-            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-center">
-              <div className="text-6xl font-light text-white tracking-tighter">{results.total}</div>
-              <div className="text-xs uppercase tracking-widest text-emerald-500 mt-1">Score</div>
-            </div>
-          </div>
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+        {/* Core Metrics */}
+        <div className="lg:col-span-4 space-y-6">
+           <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8 relative overflow-hidden group">
+              <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity">
+                <Target size={100} />
+              </div>
+              <div className="text-[10px] uppercase tracking-[0.3em] text-zinc-500 mb-2">Effective Optionality</div>
+              <div className="text-7xl font-light text-white tracking-tighter mb-4">{result.scores.effective_optionality.toFixed(1)}</div>
+              <div className="text-[10px] text-zinc-600 uppercase tracking-widest">GEM: {result.scores.gem_score.toFixed(1)}</div>
+           </div>
+
+           <div className="bg-zinc-900/50 border border-zinc-800/50 rounded-3xl p-6">
+              <h3 className="text-[10px] uppercase tracking-widest text-zinc-500 mb-6 flex items-center gap-2">
+                <BarChart3 size={12} /> Pillar Analysis
+              </h3>
+              <div className="space-y-4">
+                {Object.entries(result.scores.pillars).map(([key, val]) => (
+                  <div key={key}>
+                    <div className="flex justify-between text-[9px] uppercase tracking-widest text-zinc-400 mb-1">
+                      <span>{key}</span>
+                      <span>{val.toFixed(0)}</span>
+                    </div>
+                    <div className="h-1 bg-zinc-800 rounded-full overflow-hidden">
+                      <div className="h-full bg-emerald-500/40" style={{ width: `${Math.min(100, (val / 15) * 100)}%` }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+           </div>
         </div>
 
-        <div className="space-y-10">
-          <div>
-            <h3 className="text-xl font-light text-white mb-2">Structure Analysis</h3>
-            <p className="text-zinc-400 leading-relaxed">
-              {results.narrative} This is not a judgment, but a baseline.
-            </p>
-          </div>
+        {/* Narrative & Recommendation */}
+        <div className="lg:col-span-8 space-y-8">
+           <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8">
+              <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-4">Proposed Action Profile</div>
+              <h2 className="text-2xl font-light text-white leading-relaxed mb-6">
+                "{result.idea}"
+              </h2>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                 <div className="p-4 bg-zinc-950 rounded-2xl border border-zinc-800">
+                    <div className="text-[8px] text-zinc-500 uppercase mb-1">Gain</div>
+                    <div className="text-xl text-white">{result.scores.gain}</div>
+                 </div>
+                 <div className="p-4 bg-zinc-950 rounded-2xl border border-zinc-800">
+                    <div className="text-[8px] text-zinc-500 uppercase mb-1">Effort</div>
+                    <div className="text-xl text-white">{result.scores.effort}</div>
+                 </div>
+                 <div className="p-4 bg-zinc-950 rounded-2xl border border-zinc-800">
+                    <div className="text-[8px] text-zinc-500 uppercase mb-1">Rev</div>
+                    <div className="text-xl text-white">{result.scores.reversibility}</div>
+                 </div>
+                 <div className="p-4 bg-zinc-950 rounded-2xl border border-zinc-800">
+                    <div className="text-[8px] text-zinc-500 uppercase mb-1">TP</div>
+                    <div className="text-xl text-white">{result.scores.time_penalty}</div>
+                 </div>
+              </div>
+           </div>
 
-          <div>
-            <h3 className="text-xl font-light text-white mb-6 flex items-center gap-2">
-              <RefreshCw size={18} className="text-emerald-500" />
-              Reversible Moves
-            </h3>
-            <div className="space-y-4">
-              {results.moves.map((move, idx) => (
-                <div key={idx} className="p-5 bg-zinc-900/50 border border-zinc-800 rounded-lg hover:border-zinc-700 transition-colors">
-                  <div className="flex justify-between items-start mb-2">
-                    <span className="text-xs font-bold text-emerald-500 uppercase tracking-wider">{move.area}</span>
-                    <span className="text-xs text-zinc-600 border border-zinc-800 px-2 py-0.5 rounded-full">{move.reversibility} Reversibility</span>
-                  </div>
-                  <p className="text-zinc-200">{move.option}</p>
+           <div className="bg-emerald-500 text-zinc-950 p-10 rounded-3xl flex flex-col md:flex-row justify-between items-center gap-6">
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                   <ShieldCheck size={18} />
+                   <span className="text-[10px] uppercase tracking-widest font-bold">Protocol Instruction</span>
                 </div>
-              ))}
-              {results.moves.length === 0 && (
-                <div className="text-zinc-500 italic">No immediate structural weaknesses detected. Focus on capital preservation.</div>
-              )}
-            </div>
-          </div>
-
-          <div className="pt-6 border-t border-zinc-800">
-            <p className="text-xs text-zinc-600 leading-relaxed">
-              DISCLAIMER: This system provides an informational framework for decision-making. 
-              It is not financial, legal, or tax advice. Do not take irreversible actions based solely on this output.
-            </p>
-          </div>
+                <p className="text-4xl font-light tracking-tight">{result.recommendation}</p>
+              </div>
+              <button 
+                onClick={() => setMode(AppMode.ASSESSMENT)}
+                className="px-6 py-3 bg-zinc-950 text-white rounded-full text-xs uppercase tracking-widest font-bold flex items-center gap-2 hover:bg-zinc-800 transition-colors"
+              >
+                <RefreshCw size={14} /> Re-Sync Logic
+              </button>
+           </div>
         </div>
       </div>
     </div>

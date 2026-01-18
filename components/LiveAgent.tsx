@@ -12,7 +12,7 @@ const LiveAgent: React.FC<Props> = ({ setMode }) => {
   const [active, setActive] = useState(false);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [volume, setVolume] = useState(0); // For visualizer
+  const [visualizerData, setVisualizerData] = useState({ rms: 0, peaks: [0, 0, 0] });
 
   // Refs for audio context and resources
   const inputAudioContextRef = useRef<AudioContext | null>(null);
@@ -21,7 +21,8 @@ const LiveAgent: React.FC<Props> = ({ setMode }) => {
   const sessionRef = useRef<any>(null);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const nextStartTimeRef = useRef<number>(0);
-  const visualizerFrameRef = useRef<number>(0);
+  const animationFrameRef = useRef<number>(0);
+  const volumeRef = useRef(0);
 
   // Helper: Create PCM Blob
   const createBlob = (data: Float32Array) => {
@@ -30,17 +31,14 @@ const LiveAgent: React.FC<Props> = ({ setMode }) => {
     for (let i = 0; i < l; i++) {
       int16[i] = data[i] * 32768;
     }
-    // Simple way to get raw bytes for sending
     const uint8 = new Uint8Array(int16.buffer);
     let binary = '';
     const len = uint8.byteLength;
     for (let i = 0; i < len; i++) {
       binary += String.fromCharCode(uint8[i]);
     }
-    const b64 = btoa(binary);
-
     return {
-      data: b64,
+      data: btoa(binary),
       mimeType: 'audio/pcm;rate=16000',
     };
   };
@@ -72,12 +70,40 @@ const LiveAgent: React.FC<Props> = ({ setMode }) => {
     return buffer;
   };
 
+  // Animation Loop for Visualizer
+  const updateVisualizer = useCallback(() => {
+    const currentRms = volumeRef.current;
+    
+    // Create organic-feeling variations for rings
+    setVisualizerData({
+      rms: currentRms,
+      peaks: [
+        currentRms * (0.8 + Math.random() * 0.4),
+        Math.pow(currentRms, 0.8) * 1.2,
+        Math.pow(currentRms, 1.2) * 0.9
+      ]
+    });
+    
+    // Decay volume slightly over time if no new data
+    volumeRef.current *= 0.85;
+    animationFrameRef.current = requestAnimationFrame(updateVisualizer);
+  }, []);
+
+  useEffect(() => {
+    if (connected) {
+      animationFrameRef.current = requestAnimationFrame(updateVisualizer);
+    } else {
+      cancelAnimationFrame(animationFrameRef.current);
+      setVisualizerData({ rms: 0, peaks: [0, 0, 0] });
+    }
+    return () => cancelAnimationFrame(animationFrameRef.current);
+  }, [connected, updateVisualizer]);
+
   const startSession = async () => {
     try {
       setActive(true);
       setError(null);
 
-      // 1. Audio Context Setup
       inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       
@@ -86,16 +112,13 @@ const LiveAgent: React.FC<Props> = ({ setMode }) => {
       const outputNode = outputCtx.createGain();
       outputNode.connect(outputCtx.destination);
 
-      // 2. Microphone Stream
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
-      // 3. Gemini Client
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-      // 4. Connect Session
       const sessionPromise = ai.live.connect({
-        model: 'gemini-2.5-flash-native-audio-preview-09-2025',
+        model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
@@ -106,23 +129,17 @@ const LiveAgent: React.FC<Props> = ({ setMode }) => {
         callbacks: {
           onopen: () => {
             setConnected(true);
-            
-            // Start input processing
             const source = inputCtx.createMediaStreamSource(stream);
             const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
             
             scriptProcessor.onaudioprocess = (e) => {
-              if (!sessionRef.current) return;
-              
               const inputData = e.inputBuffer.getChannelData(0);
-              // Calculate volume for visualizer
               let sum = 0;
               for(let i=0; i<inputData.length; i++) sum += inputData[i] * inputData[i];
-              setVolume(Math.sqrt(sum / inputData.length));
+              const rms = Math.sqrt(sum / inputData.length);
+              volumeRef.current = Math.max(rms, volumeRef.current * 0.9); // Smooth decay
 
               const pcmBlob = createBlob(inputData);
-              
-              // Use the resolved session promise to send data
               sessionPromise.then(session => {
                   session.sendRealtimeInput({ media: pcmBlob });
               });
@@ -133,28 +150,17 @@ const LiveAgent: React.FC<Props> = ({ setMode }) => {
           },
           onmessage: async (message: LiveServerMessage) => {
             const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-            
             if (base64Audio) {
               const ctx = outputAudioContextRef.current;
               if (!ctx) return;
-
               nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
-              
-              const audioBuffer = await decodeAudioData(
-                base64Audio,
-                ctx,
-                24000,
-                1
-              );
-
+              const audioBuffer = await decodeAudioData(base64Audio, ctx, 24000, 1);
               const source = ctx.createBufferSource();
               source.buffer = audioBuffer;
               source.connect(outputNode);
-              
               source.addEventListener('ended', () => {
                 sourcesRef.current.delete(source);
               });
-
               source.start(nextStartTimeRef.current);
               nextStartTimeRef.current += audioBuffer.duration;
               sourcesRef.current.add(source);
@@ -163,7 +169,7 @@ const LiveAgent: React.FC<Props> = ({ setMode }) => {
             const interrupted = message.serverContent?.interrupted;
             if (interrupted) {
               for (const src of sourcesRef.current) {
-                src.stop();
+                try { src.stop(); } catch(e) {}
                 sourcesRef.current.delete(src);
               }
               nextStartTimeRef.current = 0;
@@ -180,10 +186,6 @@ const LiveAgent: React.FC<Props> = ({ setMode }) => {
         }
       });
       
-      // Store session promise wrapper if needed, but SDK handles the connection state mostly
-      // Here we just ensure we can reference it if we need to call sendRealtimeInput
-      // But we do that inside the callback using the promise variable itself.
-      // We store the session object for cleanup if needed (though SDK has close method)
       sessionRef.current = { close: () => sessionPromise.then(s => s.close()) };
 
     } catch (err) {
@@ -196,41 +198,35 @@ const LiveAgent: React.FC<Props> = ({ setMode }) => {
   const stopSession = useCallback(() => {
     setActive(false);
     setConnected(false);
-    
     if (sessionRef.current) {
       sessionRef.current.close();
       sessionRef.current = null;
     }
-
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(t => t.stop());
       streamRef.current = null;
     }
-
     if (inputAudioContextRef.current) {
       inputAudioContextRef.current.close();
       inputAudioContextRef.current = null;
     }
-
     if (outputAudioContextRef.current) {
       outputAudioContextRef.current.close();
       outputAudioContextRef.current = null;
     }
-
     sourcesRef.current.clear();
     nextStartTimeRef.current = 0;
-    setVolume(0);
+    volumeRef.current = 0;
   }, []);
 
   useEffect(() => {
     return () => stopSession();
   }, [stopSession]);
 
-
   return (
     <div className="flex flex-col items-center justify-center min-h-[60vh] max-w-2xl mx-auto px-6 relative">
       <div className="absolute top-0 right-0">
-        <button onClick={() => { stopSession(); setMode(AppMode.LANDING); }} className="p-3 text-zinc-500 hover:text-white">
+        <button onClick={() => { stopSession(); setMode(AppMode.LANDING); }} className="p-3 text-zinc-500 hover:text-white transition-colors">
           <X size={24} />
         </button>
       </div>
@@ -241,34 +237,59 @@ const LiveAgent: React.FC<Props> = ({ setMode }) => {
           Live Neural Interface
         </div>
         <h2 className="text-3xl font-light text-white mb-2">Voice Mode</h2>
-        <p className="text-zinc-500">Have a calm, structure-focused conversation.</p>
+        <p className="text-zinc-500">A calm, structural mirror.</p>
       </div>
 
-      <div className="relative mb-12 flex items-center justify-center">
-         {/* Visualizer Ring */}
+      <div className="relative mb-16 flex items-center justify-center">
+         {/* Dynamic Feedback Rings */}
+         {connected && (
+           <>
+             <div 
+               className="absolute w-56 h-56 rounded-full border border-emerald-500/20 transition-transform duration-75 ease-out opacity-40"
+               style={{ transform: `scale(${1 + visualizerData.peaks[0] * 1.2})` }}
+             />
+             <div 
+               className="absolute w-64 h-64 rounded-full border border-emerald-500/10 transition-transform duration-100 ease-out opacity-20"
+               style={{ transform: `scale(${1 + visualizerData.peaks[1] * 1.5})` }}
+             />
+             <div 
+               className="absolute w-48 h-48 rounded-full bg-emerald-500/5 blur-xl transition-all duration-75"
+               style={{ transform: `scale(${1 + visualizerData.rms * 2})`, opacity: visualizerData.rms * 5 }}
+             />
+           </>
+         )}
+
          <div 
-           className="w-48 h-48 rounded-full bg-zinc-900 border border-zinc-700 flex items-center justify-center transition-all duration-75"
+           className="relative z-10 w-48 h-48 rounded-full bg-zinc-900 border border-zinc-700 flex items-center justify-center transition-all duration-100"
            style={{
-             boxShadow: connected ? `0 0 ${volume * 500}px ${volume * 100}px rgba(16, 185, 129, 0.3)` : 'none',
-             transform: connected ? `scale(${1 + volume * 0.5})` : 'scale(1)'
+             boxShadow: connected ? `0 0 ${visualizerData.rms * 100}px rgba(16, 185, 129, ${0.1 + visualizerData.rms})` : 'none',
+             transform: connected ? `scale(${1 + visualizerData.rms * 0.3})` : 'scale(1)'
            }}
          >
            {!active ? (
              <button 
                onClick={startSession}
-               className="w-full h-full rounded-full flex flex-col items-center justify-center gap-2 text-zinc-400 hover:text-emerald-400 hover:bg-zinc-800 transition-all"
+               className="w-full h-full rounded-full flex flex-col items-center justify-center gap-2 text-zinc-400 hover:text-emerald-400 hover:bg-zinc-800 transition-all group"
              >
-               <Mic size={32} />
-               <span className="text-xs uppercase tracking-widest">Connect</span>
+               <div className="p-4 rounded-full bg-zinc-800 group-hover:bg-emerald-500/10 transition-colors">
+                <Mic size={32} />
+               </div>
+               <span className="text-[10px] uppercase tracking-[0.2em] font-medium">Initialize</span>
              </button>
            ) : (
              <div className="flex flex-col items-center justify-center">
                {!connected ? (
-                 <Loader2 className="animate-spin text-zinc-500" size={32} />
+                 <div className="space-y-4 text-center">
+                    <Loader2 className="animate-spin text-zinc-600 mx-auto" size={32} />
+                    <span className="text-[10px] text-zinc-500 uppercase tracking-widest">Routing...</span>
+                 </div>
                ) : (
-                 <div className="space-y-2 text-center">
-                   <Mic size={32} className="text-emerald-500 mx-auto" />
-                   <div className="text-xs text-emerald-500 uppercase tracking-widest">Listening</div>
+                 <div className="space-y-2 text-center animate-fade-in">
+                   <div className="relative">
+                     <Mic size={32} className="text-emerald-500 mx-auto relative z-10" />
+                     <div className="absolute inset-0 bg-emerald-500/20 blur-lg rounded-full animate-pulse" />
+                   </div>
+                   <div className="text-[10px] text-emerald-500 uppercase tracking-[0.2em] font-bold">Session Active</div>
                  </div>
                )}
              </div>
@@ -276,28 +297,30 @@ const LiveAgent: React.FC<Props> = ({ setMode }) => {
          </div>
       </div>
 
-      {active && connected && (
-        <button 
-          onClick={stopSession}
-          className="flex items-center gap-2 text-zinc-500 hover:text-red-400 transition-colors"
-        >
-          <MicOff size={16} />
-          <span className="text-sm">End Session</span>
-        </button>
-      )}
+      <div className="flex flex-col items-center gap-6">
+        {active && connected && (
+          <button 
+            onClick={stopSession}
+            className="group flex items-center gap-3 px-6 py-2 rounded-full border border-zinc-800 hover:border-red-500/50 hover:bg-red-500/5 text-zinc-500 hover:text-red-400 transition-all"
+          >
+            <MicOff size={14} />
+            <span className="text-xs uppercase tracking-widest font-medium">Terminate Session</span>
+          </button>
+        )}
+
+        <div className="text-center max-w-xs space-y-4">
+          <p className="text-[11px] text-zinc-600 leading-relaxed uppercase tracking-wider">
+            Natural language interface enabled via Gemini 2.5 Flash. 
+            Calm dialogue is encouraged.
+          </p>
+        </div>
+      </div>
 
       {error && (
-        <div className="mt-4 p-4 bg-red-500/10 border border-red-500/20 text-red-400 text-sm rounded-lg">
+        <div className="mt-8 p-4 bg-red-500/5 border border-red-500/20 text-red-400 text-xs rounded-lg animate-fade-in uppercase tracking-widest text-center">
           {error}
         </div>
       )}
-
-      <div className="mt-12 text-center max-w-sm mx-auto">
-        <p className="text-xs text-zinc-600 leading-relaxed">
-          The agent uses the Gemini Live API for real-time low-latency interaction. 
-          Speak naturally. It is aware of the "Optionality" doctrine.
-        </p>
-      </div>
     </div>
   );
 };
